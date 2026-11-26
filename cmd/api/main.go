@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Ayushmangit/systemDesignGO/internal/feed"
 	"github.com/Ayushmangit/systemDesignGO/internal/platform/postgres"
 	"github.com/Ayushmangit/systemDesignGO/internal/posts"
 	"github.com/Ayushmangit/systemDesignGO/internal/users"
@@ -48,10 +49,15 @@ func run() error {
 
 	u := users.New(pool)
 	mux.HandleFunc("POST /users", u.Create)
+	mux.HandleFunc("POST /users/{handle}/follow", u.Auth(u.Follow))
+	mux.HandleFunc("DELETE /users/{handle}/unfollow", u.Auth(u.UnFollow))
 
 	p := posts.New(pool)
 	mux.HandleFunc("POST /posts", u.Auth(p.Create))
 	mux.HandleFunc("GET /users/{handle}/posts", p.List)
+
+	f := feed.New(pool)
+	mux.HandleFunc("GET /feed", u.Auth(f.List))
 
 	srv := &http.Server{
 		Addr:              addr,
