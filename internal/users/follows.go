@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -40,6 +41,7 @@ func (h *Handler) Follow(w http.ResponseWriter, r *http.Request) {
 		httpx.ServerError(w, r, err)
 		return
 	}
+	h.updateTimeline(r.Context(), w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -54,5 +56,14 @@ func (h *Handler) UnFollow(w http.ResponseWriter, r *http.Request) {
 		httpx.ServerError(w, r, err)
 		return
 	}
+	h.updateTimeline(r.Context(), w, r)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) updateTimeline(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	// who they follow just changed , so their timeline is out of date.
+	if err := h.tl.Drop(r.Context(), ID(r.Context())); err != nil {
+		httpx.ServerError(w, r, err)
+		return
+	}
 }

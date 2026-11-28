@@ -1,6 +1,7 @@
-package feed
+package feed_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,19 +10,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Ayushmangit/systemDesignGO/internal/feed"
 	"github.com/Ayushmangit/systemDesignGO/internal/platform/testdb"
 	"github.com/Ayushmangit/systemDesignGO/internal/posts"
+	"github.com/Ayushmangit/systemDesignGO/internal/timeline"
 	"github.com/Ayushmangit/systemDesignGO/internal/users"
+	"github.com/redis/go-redis/v9"
 )
 
 type client struct {
 	t   *testing.T
 	url string
+	rdb *redis.Client
 }
 
-func NewClient(t *testing.T) *client {
-	db := testdb.New(t)
-	u, p, f := users.New(db), posts.New(db), New(db)
+func newClient(t *testing.T) *client {
+	db, rdb := testdb.New(t), testdb.Redis(t)
+	tl := timeline.New(db, rdb)
+	u, p, f := users.New(db, tl), posts.New(db, tl), feed.New(db, tl)
 
 	mux := http.NewServeMux()
 
@@ -31,7 +37,7 @@ func NewClient(t *testing.T) *client {
 	mux.HandleFunc("GET /feed", u.Auth(f.List))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &client{t, srv.URL}
+	return &client{t, srv.URL, rdb}
 }
 
 func (c *client) call(method, path, token, body string, want int, out any) {
@@ -71,7 +77,7 @@ func (c *client) signUp(handle string) string {
 }
 
 func TestFeedPaging(t *testing.T) {
-	c := NewClient(t)
+	c := newClient(t)
 	alice, bob, carol := c.signUp("alice"), c.signUp("bob"), c.signUp("carol")
 	c.call("POST", "/users/alice/follow", carol, "", http.StatusNoContent, nil)
 	c.call("POST", "/users/bob/follow", carol, "", http.StatusNoContent, nil)
@@ -82,7 +88,7 @@ func TestFeedPaging(t *testing.T) {
 	var got []int64
 	path := "/feed?limit=2"
 	for {
-		var page Page
+		var page feed.Page
 		c.call("GET", path, carol, "", http.StatusOK, &page)
 		for _, p := range page.Posts {
 			got = append(got, p.ID)
@@ -102,5 +108,40 @@ func TestFeedPaging(t *testing.T) {
 	}
 	if want := []int64{4, 3, 2, 1}; !slices.Equal(got, want) {
 		t.Fatalf("feed ids = %v, want %v", got, want)
+	}
+}
+
+func TestTimeline(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	alice, bob := c.signUp("alice"), c.signUp("bob")
+	c.call("POST", "/users/alice/follow", bob, "", http.StatusNoContent, nil)
+	post := func(token string) {
+		c.call("POST", "/posts", token, `{"body": "hello"}`, http.StatusCreated, nil)
+	}
+	post(alice)
+	post(alice)
+	// Bob has never read his feed, so those two posts must not start a timeline for him.
+	if n := c.rdb.Exists(ctx, "timeline:2").Val(); n != 0 {
+		t.Fatal("a post started a timeline for a reader who has none")
+	}
+	// His first read builds it, with both posts.
+	var page feed.Page
+	c.call("GET", "/feed", bob, "", http.StatusOK, &page)
+	if len(page.Posts) != 2 {
+		t.Fatalf("first read: %d posts, want 2", len(page.Posts))
+	}
+	// From now on, a new post reaches it. The zero is the marker.
+	post(alice)
+	got := c.rdb.ZRange(ctx, "timeline:2", 0, -1).Val()
+	if want := []string{"0", "1", "2", "3"}; !slices.Equal(got, want) {
+		t.Fatalf("cached timeline = %v, want %v", got, want)
+	}
+	// Reads come from Redis. To prove it, we plant one of bob's own posts.
+	post(bob)
+	c.rdb.ZAdd(ctx, "timeline:2", redis.Z{Score: 4, Member: 4})
+	c.call("GET", "/feed?limit=1", bob, "", http.StatusOK, &page)
+	if len(page.Posts) != 1 || page.Posts[0].ID != 4 {
+		t.Fatalf("page = %+v, want post 4: the read didn't come from Redis", page.Posts)
 	}
 }

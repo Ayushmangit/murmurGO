@@ -14,7 +14,9 @@ import (
 
 	"github.com/Ayushmangit/systemDesignGO/internal/feed"
 	"github.com/Ayushmangit/systemDesignGO/internal/platform/postgres"
+	"github.com/Ayushmangit/systemDesignGO/internal/platform/redisx"
 	"github.com/Ayushmangit/systemDesignGO/internal/posts"
+	"github.com/Ayushmangit/systemDesignGO/internal/timeline"
 	"github.com/Ayushmangit/systemDesignGO/internal/users"
 )
 
@@ -45,18 +47,25 @@ func run() error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
+	rdb, err := redisx.Connect(ctx, os.Getenv("REDIS_URL"))
+	if err != nil {
+		return fmt.Errorf("connect to redis: %w", err)
+	}
+	defer rdb.Close()
+	timelines := timeline.New(pool, rdb)
+
 	mux := http.NewServeMux()
 
-	u := users.New(pool)
+	u := users.New(pool, timelines)
 	mux.HandleFunc("POST /users", u.Create)
 	mux.HandleFunc("POST /users/{handle}/follow", u.Auth(u.Follow))
 	mux.HandleFunc("DELETE /users/{handle}/unfollow", u.Auth(u.UnFollow))
 
-	p := posts.New(pool)
+	p := posts.New(pool, timelines)
 	mux.HandleFunc("POST /posts", u.Auth(p.Create))
 	mux.HandleFunc("GET /users/{handle}/posts", p.List)
 
-	f := feed.New(pool)
+	f := feed.New(pool, timelines)
 	mux.HandleFunc("GET /feed", u.Auth(f.List))
 
 	srv := &http.Server{
